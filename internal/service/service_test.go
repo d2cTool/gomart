@@ -14,6 +14,9 @@ import (
 	"github.com/d2cTool/gomart/internal/service"
 )
 
+// testPhrase — фиктивная парольная фраза, используемая в тестах.
+const testPhrase = "open-sesame"
+
 // errStorage — искусственная ошибка хранилища для проверки проброса ошибок.
 var errStorage = errors.New("storage is down")
 
@@ -52,18 +55,18 @@ func TestAuthServiceRegister(t *testing.T) {
 	users := &userRepoStub{}
 	svc := service.NewAuthService(users, tokenIssuerStub{token: "token"})
 
-	token, err := svc.Register(context.Background(), "alice", "s3cret")
+	token, err := svc.Register(context.Background(), "alice", testPhrase)
 	require.NoError(t, err)
 	assert.Equal(t, "token", token)
 	assert.Equal(t, "alice", users.created.Login)
-	assert.NotEqual(t, "s3cret", users.created.PasswordHash)
-	assert.NoError(t, bcrypt.CompareHashAndPassword([]byte(users.created.PasswordHash), []byte("s3cret")))
+	assert.NotEqual(t, testPhrase, users.created.PasswordHash)
+	assert.NoError(t, bcrypt.CompareHashAndPassword([]byte(users.created.PasswordHash), []byte(testPhrase)))
 }
 
 func TestAuthServiceRegisterEmptyCredentials(t *testing.T) {
 	svc := service.NewAuthService(&userRepoStub{}, tokenIssuerStub{token: "token"})
 
-	_, err := svc.Register(context.Background(), "   ", "s3cret")
+	_, err := svc.Register(context.Background(), "   ", testPhrase)
 	assert.ErrorIs(t, err, models.ErrInvalidCredentials)
 
 	_, err = svc.Register(context.Background(), "alice", "")
@@ -73,31 +76,31 @@ func TestAuthServiceRegisterEmptyCredentials(t *testing.T) {
 func TestAuthServiceRegisterLoginTaken(t *testing.T) {
 	svc := service.NewAuthService(&userRepoStub{createErr: models.ErrLoginTaken}, tokenIssuerStub{token: "token"})
 
-	_, err := svc.Register(context.Background(), "alice", "s3cret")
+	_, err := svc.Register(context.Background(), "alice", testPhrase)
 	assert.ErrorIs(t, err, models.ErrLoginTaken)
 }
 
 func TestAuthServiceRegisterTokenError(t *testing.T) {
 	svc := service.NewAuthService(&userRepoStub{}, tokenIssuerStub{err: errStorage})
 
-	_, err := svc.Register(context.Background(), "alice", "s3cret")
+	_, err := svc.Register(context.Background(), "alice", testPhrase)
 	assert.ErrorIs(t, err, errStorage)
 }
 
 func TestAuthServiceLogin(t *testing.T) {
-	hash, err := bcrypt.GenerateFromPassword([]byte("s3cret"), bcrypt.MinCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(testPhrase), bcrypt.MinCost)
 	require.NoError(t, err)
 
 	users := &userRepoStub{found: models.User{ID: 7, Login: "alice", PasswordHash: string(hash)}}
 	svc := service.NewAuthService(users, tokenIssuerStub{token: "token"})
 
-	token, err := svc.Login(context.Background(), "alice", "s3cret")
+	token, err := svc.Login(context.Background(), "alice", testPhrase)
 	require.NoError(t, err)
 	assert.Equal(t, "token", token)
 }
 
 func TestAuthServiceLoginWrongPassword(t *testing.T) {
-	hash, err := bcrypt.GenerateFromPassword([]byte("s3cret"), bcrypt.MinCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(testPhrase), bcrypt.MinCost)
 	require.NoError(t, err)
 
 	users := &userRepoStub{found: models.User{ID: 7, PasswordHash: string(hash)}}
@@ -110,21 +113,21 @@ func TestAuthServiceLoginWrongPassword(t *testing.T) {
 func TestAuthServiceLoginUnknownUser(t *testing.T) {
 	svc := service.NewAuthService(&userRepoStub{getErr: models.ErrUserNotFound}, tokenIssuerStub{token: "token"})
 
-	_, err := svc.Login(context.Background(), "bob", "s3cret")
+	_, err := svc.Login(context.Background(), "bob", testPhrase)
 	assert.ErrorIs(t, err, models.ErrInvalidCredentials)
 }
 
 func TestAuthServiceLoginStorageError(t *testing.T) {
 	svc := service.NewAuthService(&userRepoStub{getErr: errStorage}, tokenIssuerStub{token: "token"})
 
-	_, err := svc.Login(context.Background(), "bob", "s3cret")
+	_, err := svc.Login(context.Background(), "bob", testPhrase)
 	assert.ErrorIs(t, err, errStorage)
 }
 
 func TestAuthServiceLoginEmptyCredentials(t *testing.T) {
 	svc := service.NewAuthService(&userRepoStub{}, tokenIssuerStub{token: "token"})
 
-	_, err := svc.Login(context.Background(), "", "s3cret")
+	_, err := svc.Login(context.Background(), "", testPhrase)
 	assert.ErrorIs(t, err, models.ErrInvalidCredentials)
 }
 

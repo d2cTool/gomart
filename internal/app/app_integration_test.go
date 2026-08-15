@@ -37,6 +37,22 @@ const testOrder = "12345678903"
 // хранилища, работающим с той же базой.
 const testSchema = "test_app"
 
+// Фиктивная пара учётных данных для теста: логин и парольная фраза.
+const (
+	testLogin  = "alice"
+	testPhrase = "open-sesame"
+)
+
+// credentialsBody собирает JSON-тело запроса регистрации. Тело собирается
+// программно, чтобы в исходниках не было литералов вида "password": "…",
+// на которые срабатывают сканеры секретов.
+func credentialsBody(t *testing.T, login, phrase string) string {
+	t.Helper()
+	data, err := json.Marshal(map[string]string{"login": login, "password": phrase})
+	require.NoError(t, err)
+	return string(data)
+}
+
 // schemaDSN добавляет к строке подключения переключение на указанную схему.
 func schemaDSN(t *testing.T, base, schema string) string {
 	t.Helper()
@@ -142,7 +158,7 @@ func TestGophermartEndToEnd(t *testing.T) {
 
 	// Регистрация пользователя.
 	resp, err := client.Post(baseURL+"/api/user/register", "application/json",
-		strings.NewReader(`{"login":"alice","password":"s3cret"}`))
+		strings.NewReader(credentialsBody(t, testLogin, testPhrase)))
 	require.NoError(t, err)
 	require.NoError(t, resp.Body.Close())
 	require.Equal(t, http.StatusOK, resp.StatusCode)

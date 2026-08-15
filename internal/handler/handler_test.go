@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -100,8 +101,23 @@ func newTestServer(t *testing.T, auth handler.AuthService, orders handler.OrderS
 	return srv
 }
 
-// do выполняет запрос к тестовому серверу с токеном аутентификации.
-func do(t *testing.T, srv *httptest.Server, method, path, contentType, body string, authorize bool) *http.Response {
+// response — прочитанный до конца ответ тестового сервера.
+type response struct {
+	status  int
+	header  http.Header
+	cookies []*http.Cookie
+	body    []byte
+}
+
+// decode разбирает тело ответа как JSON.
+func (r response) decode(t *testing.T, dst any) {
+	t.Helper()
+	require.NoError(t, json.Unmarshal(r.body, dst))
+}
+
+// do выполняет запрос к тестовому серверу с токеном аутентификации
+// и возвращает полностью прочитанный ответ.
+func do(t *testing.T, srv *httptest.Server, method, path, contentType, body string, authorize bool) response {
 	t.Helper()
 	req, err := http.NewRequest(method, srv.URL+path, strings.NewReader(body))
 	require.NoError(t, err)
@@ -111,10 +127,15 @@ func do(t *testing.T, srv *httptest.Server, method, path, contentType, body stri
 	if authorize {
 		req.Header.Set("Authorization", "Bearer token")
 	}
+
 	resp, err := srv.Client().Do(req)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = resp.Body.Close() })
-	return resp
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+
+	payload, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	return response{status: resp.StatusCode, header: resp.Header, cookies: resp.Cookies(), body: payload}
 }
 
 func TestRegister(t *testing.T) {
@@ -123,13 +144,13 @@ func TestRegister(t *testing.T) {
 
 	resp := do(t, srv, http.MethodPost, "/api/user/register", "application/json", `{"login":"alice","password":"s3cret"}`, false)
 
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Equal(t, "Bearer issued-token", resp.Header.Get("Authorization"))
+	assert.Equal(t, http.StatusOK, resp.status)
+	assert.Equal(t, "Bearer issued-token", resp.header.Get("Authorization"))
 	assert.Equal(t, "alice", auth.gotLogin)
 	assert.Equal(t, "s3cret", auth.gotPassword)
 
 	var found bool
-	for _, cookie := range resp.Cookies() {
+	for _, cookie := range resp.cookies {
 		if cookie.Name == middleware.AuthCookieName {
 			found = true
 			assert.Equal(t, "issued-token", cookie.Value)
@@ -157,7 +178,7 @@ func TestRegisterErrors(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			srv := newTestServer(t, &authServiceStub{registerErr: tt.err}, &orderServiceStub{}, &balanceServiceStub{}, parserStub{})
 			resp := do(t, srv, http.MethodPost, "/api/user/register", "application/json", tt.body, false)
-			assert.Equal(t, tt.wantStatus, resp.StatusCode)
+			assert.Equal(t, tt.wantStatus, resp.status)
 		})
 	}
 }
@@ -167,8 +188,8 @@ func TestLogin(t *testing.T) {
 
 	resp := do(t, srv, http.MethodPost, "/api/user/login", "application/json", `{"login":"alice","password":"s3cret"}`, false)
 
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Equal(t, "Bearer issued-token", resp.Header.Get("Authorization"))
+	assert.Equal(t, http.StatusOK, resp.status)
+	assert.Equal(t, "Bearer issued-token", resp.header.Get("Authorization"))
 }
 
 func TestLoginErrors(t *testing.T) {
@@ -187,7 +208,7 @@ func TestLoginErrors(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			srv := newTestServer(t, &authServiceStub{loginErr: tt.err}, &orderServiceStub{}, &balanceServiceStub{}, parserStub{})
 			resp := do(t, srv, http.MethodPost, "/api/user/login", "application/json", tt.body, false)
-			assert.Equal(t, tt.wantStatus, resp.StatusCode)
+			assert.Equal(t, tt.wantStatus, resp.status)
 		})
 	}
 }
@@ -198,7 +219,7 @@ func TestUploadOrder(t *testing.T) {
 
 	resp := do(t, srv, http.MethodPost, "/api/user/orders", "text/plain", "12345678903\n", true)
 
-	assert.Equal(t, http.StatusAccepted, resp.StatusCode)
+	assert.Equal(t, http.StatusAccepted, resp.status)
 	assert.Equal(t, int64(7), orders.gotUserID)
 	assert.Equal(t, "12345678903", orders.gotNumber)
 }
@@ -221,7 +242,7 @@ func TestUploadOrderStatuses(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			srv := newTestServer(t, &authServiceStub{}, &orderServiceStub{uploadErr: tt.err}, &balanceServiceStub{}, parserStub{userID: 7})
 			resp := do(t, srv, http.MethodPost, "/api/user/orders", "text/plain", tt.body, true)
-			assert.Equal(t, tt.wantStatus, resp.StatusCode)
+			assert.Equal(t, tt.wantStatus, resp.status)
 		})
 	}
 }
@@ -243,7 +264,7 @@ func TestProtectedEndpointsRequireAuth(t *testing.T) {
 	for _, p := range paths {
 		t.Run(p.method+" "+p.path, func(t *testing.T) {
 			resp := do(t, srv, p.method, p.path, "", "", false)
-			assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+			assert.Equal(t, http.StatusUnauthorized, resp.status)
 		})
 	}
 }
@@ -257,11 +278,11 @@ func TestListOrders(t *testing.T) {
 	srv := newTestServer(t, &authServiceStub{}, orders, &balanceServiceStub{}, parserStub{userID: 7})
 
 	resp := do(t, srv, http.MethodGet, "/api/user/orders", "", "", true)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Contains(t, resp.Header.Get("Content-Type"), "application/json")
+	require.Equal(t, http.StatusOK, resp.status)
+	assert.Contains(t, resp.header.Get("Content-Type"), "application/json")
 
 	var got []models.Order
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
+	resp.decode(t, &got)
 	require.Len(t, got, 2)
 	assert.Equal(t, "9278923470", got[0].Number)
 	require.NotNil(t, got[0].Accrual)
@@ -273,14 +294,14 @@ func TestListOrdersNoContent(t *testing.T) {
 	srv := newTestServer(t, &authServiceStub{}, &orderServiceStub{}, &balanceServiceStub{}, parserStub{userID: 7})
 
 	resp := do(t, srv, http.MethodGet, "/api/user/orders", "", "", true)
-	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
+	assert.Equal(t, http.StatusNoContent, resp.status)
 }
 
 func TestListOrdersInternalError(t *testing.T) {
 	srv := newTestServer(t, &authServiceStub{}, &orderServiceStub{listErr: errInternal}, &balanceServiceStub{}, parserStub{userID: 7})
 
 	resp := do(t, srv, http.MethodGet, "/api/user/orders", "", "", true)
-	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+	assert.Equal(t, http.StatusInternalServerError, resp.status)
 }
 
 func TestGetBalance(t *testing.T) {
@@ -288,10 +309,10 @@ func TestGetBalance(t *testing.T) {
 	srv := newTestServer(t, &authServiceStub{}, &orderServiceStub{}, balances, parserStub{userID: 7})
 
 	resp := do(t, srv, http.MethodGet, "/api/user/balance", "", "", true)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, http.StatusOK, resp.status)
 
 	var got models.Balance
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
+	resp.decode(t, &got)
 	assert.Equal(t, models.NewPoints(500.5), got.Current)
 	assert.Equal(t, models.NewPoints(42), got.Withdrawn)
 }
@@ -300,7 +321,7 @@ func TestGetBalanceInternalError(t *testing.T) {
 	srv := newTestServer(t, &authServiceStub{}, &orderServiceStub{}, &balanceServiceStub{getErr: errInternal}, parserStub{userID: 7})
 
 	resp := do(t, srv, http.MethodGet, "/api/user/balance", "", "", true)
-	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+	assert.Equal(t, http.StatusInternalServerError, resp.status)
 }
 
 func TestWithdraw(t *testing.T) {
@@ -309,7 +330,7 @@ func TestWithdraw(t *testing.T) {
 
 	resp := do(t, srv, http.MethodPost, "/api/user/balance/withdraw", "application/json", `{"order":"2377225624","sum":751}`, true)
 
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, http.StatusOK, resp.status)
 	assert.Equal(t, "2377225624", balances.gotOrder)
 	assert.Equal(t, models.NewPoints(751), balances.gotSum)
 }
@@ -332,7 +353,7 @@ func TestWithdrawErrors(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			srv := newTestServer(t, &authServiceStub{}, &orderServiceStub{}, &balanceServiceStub{withdrawErr: tt.err}, parserStub{userID: 7})
 			resp := do(t, srv, http.MethodPost, "/api/user/balance/withdraw", "application/json", tt.body, true)
-			assert.Equal(t, tt.wantStatus, resp.StatusCode)
+			assert.Equal(t, tt.wantStatus, resp.status)
 		})
 	}
 }
@@ -344,10 +365,10 @@ func TestListWithdrawals(t *testing.T) {
 	srv := newTestServer(t, &authServiceStub{}, &orderServiceStub{}, balances, parserStub{userID: 7})
 
 	resp := do(t, srv, http.MethodGet, "/api/user/withdrawals", "", "", true)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, http.StatusOK, resp.status)
 
 	var got []models.Withdrawal
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
+	resp.decode(t, &got)
 	require.Len(t, got, 1)
 	assert.Equal(t, "2377225624", got[0].Order)
 	assert.Equal(t, models.NewPoints(500), got[0].Sum)
@@ -357,12 +378,12 @@ func TestListWithdrawalsNoContent(t *testing.T) {
 	srv := newTestServer(t, &authServiceStub{}, &orderServiceStub{}, &balanceServiceStub{}, parserStub{userID: 7})
 
 	resp := do(t, srv, http.MethodGet, "/api/user/withdrawals", "", "", true)
-	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
+	assert.Equal(t, http.StatusNoContent, resp.status)
 }
 
 func TestListWithdrawalsInternalError(t *testing.T) {
 	srv := newTestServer(t, &authServiceStub{}, &orderServiceStub{}, &balanceServiceStub{listErr: errInternal}, parserStub{userID: 7})
 
 	resp := do(t, srv, http.MethodGet, "/api/user/withdrawals", "", "", true)
-	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+	assert.Equal(t, http.StatusInternalServerError, resp.status)
 }

@@ -101,6 +101,18 @@ func TestOrderInfoBrokenJSON(t *testing.T) {
 	assert.ErrorContains(t, err, "decode accrual response")
 }
 
+func TestOrderInfoUnreadableBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", "64")
+		_, _ = w.Write([]byte(`{"order":"12345678903"`))
+	}))
+	defer srv.Close()
+
+	_, err := accrual.New(srv.URL).OrderInfo(context.Background(), "12345678903")
+	assert.ErrorContains(t, err, "read accrual response")
+}
+
 func TestOrderInfoUnreachableService(t *testing.T) {
 	client := accrual.NewWithClient("http://127.0.0.1:1", &http.Client{Timeout: 100 * time.Millisecond})
 

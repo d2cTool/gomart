@@ -47,11 +47,7 @@ func Run(ctx context.Context, cfg *config.Config, log *zap.Logger) error {
 	orderService := service.NewOrderService(orders)
 	balanceService := service.NewBalanceService(balances)
 
-	router := handler.NewRouter(
-		handler.New(authService, orderService, balanceService, log),
-		tokens,
-		log,
-	)
+	router := handler.New(authService, orderService, balanceService, tokens, log).Routes()
 
 	srv := &http.Server{
 		Addr:              cfg.RunAddress,

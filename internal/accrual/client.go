@@ -54,15 +54,17 @@ func (c *Client) OrderInfo(ctx context.Context, number string) (models.AccrualIn
 	if err != nil {
 		return models.AccrualInfo{}, fmt.Errorf("call accrual system: %w", err)
 	}
-	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
+	defer func() { _ = resp.Body.Close() }()
+
+	body, readErr := readBody(resp.Body)
 
 	switch resp.StatusCode {
 	case http.StatusOK:
+		if readErr != nil {
+			return models.AccrualInfo{}, readErr
+		}
 		var info models.AccrualInfo
-		if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		if err := json.Unmarshal(body, &info); err != nil {
 			return models.AccrualInfo{}, fmt.Errorf("decode accrual response: %w", err)
 		}
 		if info.Order == "" {
@@ -72,7 +74,6 @@ func (c *Client) OrderInfo(ctx context.Context, number string) (models.AccrualIn
 	case http.StatusNoContent:
 		return models.AccrualInfo{}, models.ErrOrderNotRegistered
 	case http.StatusTooManyRequests:
-		body, _ := io.ReadAll(resp.Body)
 		return models.AccrualInfo{}, &models.TooManyRequestsError{
 			RetryAfterSeconds: retryAfter(resp.Header.Get("Retry-After")),
 			Message:           strings.TrimSpace(string(body)),
@@ -80,6 +81,15 @@ func (c *Client) OrderInfo(ctx context.Context, number string) (models.AccrualIn
 	default:
 		return models.AccrualInfo{}, fmt.Errorf("accrual system returned status %d", resp.StatusCode)
 	}
+}
+
+func readBody(body io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(body)
+	if err != nil {
+		_, _ = io.Copy(io.Discard, body)
+		return nil, fmt.Errorf("read accrual response: %w", err)
+	}
+	return data, nil
 }
 
 // retryAfter разбирает заголовок Retry-After, подставляя значение

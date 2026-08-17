@@ -25,6 +25,17 @@ type parserStub struct {
 
 func (s parserStub) Parse(string) (int64, error) { return s.userID, s.err }
 
+// recordingParser запоминает токен, с которым его вызвали.
+type recordingParser struct {
+	userID int64
+	got    string
+}
+
+func (s *recordingParser) Parse(token string) (int64, error) {
+	s.got = token
+	return s.userID, nil
+}
+
 // userIDHandler отдаёт идентификатор пользователя, найденный в контексте.
 func userIDHandler(t *testing.T, want int64) http.Handler {
 	t.Helper()
@@ -61,6 +72,56 @@ func TestAuthWithRawHeaderAndCookie(t *testing.T) {
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestAuthPrefersAuthorizationOverCookie(t *testing.T) {
+	parser := &recordingParser{userID: 7}
+	handler := middleware.Auth(parser)(userIDHandler(t, 7))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/user/orders", nil)
+	req.Header.Set("Authorization", "Bearer from-header")
+	req.AddCookie(&http.Cookie{Name: middleware.AuthCookieName, Value: "from-cookie"})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "from-header", parser.got)
+}
+
+func TestAuthFallsBackToCookieWhenHeaderHasNoToken(t *testing.T) {
+	tests := []string{"", "Bearer", "Bearer ", "Bearer   "}
+
+	for _, header := range tests {
+		t.Run("header="+header, func(t *testing.T) {
+			parser := &recordingParser{userID: 7}
+			handler := middleware.Auth(parser)(userIDHandler(t, 7))
+
+			req := httptest.NewRequest(http.MethodGet, "/api/user/orders", nil)
+			if header != "" {
+				req.Header.Set("Authorization", header)
+			}
+			req.AddCookie(&http.Cookie{Name: middleware.AuthCookieName, Value: "from-cookie"})
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			assert.Equal(t, http.StatusOK, rec.Code)
+			assert.Equal(t, "from-cookie", parser.got)
+		})
+	}
+}
+
+func TestAuthDoesNotFallBackToCookieWhenHeaderTokenIsPresent(t *testing.T) {
+	handler := middleware.Auth(parserStub{err: errors.New("invalid")})(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("handler must not be called")
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/user/orders", nil)
+	req.Header.Set("Authorization", "Bearer broken")
+	req.AddCookie(&http.Cookie{Name: middleware.AuthCookieName, Value: "valid-cookie"})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
 func TestAuthWithoutToken(t *testing.T) {

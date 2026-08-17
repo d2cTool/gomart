@@ -44,12 +44,13 @@ type Handler struct {
 	auth     AuthService
 	orders   OrderService
 	balances BalanceService
+	parser   middleware.TokenParser
 	log      *zap.Logger
 }
 
 // New создаёт набор обработчиков HTTP API.
-func New(auth AuthService, orders OrderService, balances BalanceService, log *zap.Logger) *Handler {
-	return &Handler{auth: auth, orders: orders, balances: balances, log: log}
+func New(auth AuthService, orders OrderService, balances BalanceService, parser middleware.TokenParser, log *zap.Logger) *Handler {
+	return &Handler{auth: auth, orders: orders, balances: balances, parser: parser, log: log}
 }
 
 // writeJSON отдаёт значение в формате JSON с указанным кодом ответа.

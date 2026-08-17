@@ -26,22 +26,29 @@ func NewOrderRepository(pool *pgxpool.Pool) *OrderRepository {
 // пользователем, и models.ErrOrderOwnedByAnother, если заказ принадлежит
 // другому пользователю.
 func (r *OrderRepository) Create(ctx context.Context, userID int64, number string) error {
-	return withRetry(ctx, func() error {
-		var ownerID int64
-		err := r.pool.QueryRow(ctx,
-			`INSERT INTO orders (number, user_id) VALUES ($1, $2)
-			 ON CONFLICT (number) DO NOTHING
-			 RETURNING user_id`, number, userID).Scan(&ownerID)
-		switch {
-		case err == nil:
-			return nil
-		case !errors.Is(err, pgx.ErrNoRows):
-			return fmt.Errorf("insert order: %w", err)
-		}
+	const query = `
+		WITH inserted AS (
+			INSERT INTO orders (number, user_id)
+			VALUES ($1, $2)
+			ON CONFLICT (number) DO NOTHING
+			RETURNING user_id
+		)
+		SELECT user_id, true FROM inserted
+		UNION ALL
+		SELECT user_id, false
+		FROM orders
+		WHERE number = $1 AND NOT EXISTS (SELECT 1 FROM inserted)`
 
-		if err := r.pool.QueryRow(ctx,
-			`SELECT user_id FROM orders WHERE number = $1`, number).Scan(&ownerID); err != nil {
-			return fmt.Errorf("select order owner: %w", err)
+	return withRetry(ctx, func() error {
+		var (
+			ownerID  int64
+			inserted bool
+		)
+		if err := r.pool.QueryRow(ctx, query, number, userID).Scan(&ownerID, &inserted); err != nil {
+			return fmt.Errorf("upsert order: %w", err)
+		}
+		if inserted {
+			return nil
 		}
 		if ownerID == userID {
 			return models.ErrOrderAlreadyUploaded

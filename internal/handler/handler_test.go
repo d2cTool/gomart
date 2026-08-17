@@ -118,7 +118,7 @@ func (s parserStub) Parse(string) (int64, error) { return s.userID, s.err }
 func newTestServer(t *testing.T, auth handler.AuthService, orders handler.OrderService, balances handler.BalanceService, parser middleware.TokenParser) *httptest.Server {
 	t.Helper()
 	log := zaptest.NewLogger(t)
-	srv := httptest.NewServer(handler.NewRouter(handler.New(auth, orders, balances, log), parser, log))
+	srv := httptest.NewServer(handler.New(auth, orders, balances, parser, log).Routes())
 	t.Cleanup(srv.Close)
 	return srv
 }

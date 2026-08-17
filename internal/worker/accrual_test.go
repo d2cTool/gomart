@@ -61,6 +61,13 @@ func (s *orderRepoStub) appliedOrders() []appliedAccrual {
 	return append([]appliedAccrual(nil), s.applied...)
 }
 
+// pendingBatches возвращает ещё не выданные пачки заказов.
+func (s *orderRepoStub) pendingBatches() [][]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([][]string(nil), s.batches...)
+}
+
 // accrualClientStub — подставная реализация worker.AccrualClient.
 type accrualClientStub struct {
 	mu        sync.Mutex
@@ -149,7 +156,7 @@ func TestProcessBatchSurvivesApplyError(t *testing.T) {
 	assert.NoError(t, poller.ProcessBatch(context.Background()))
 }
 
-func TestProcessBatchPausesOnTooManyRequests(t *testing.T) {
+func TestProcessBatchStopsOnTooManyRequests(t *testing.T) {
 	orders := &orderRepoStub{batches: [][]string{{"12345678903", "9278923470"}}}
 	client := &accrualClientStub{errs: map[string]error{
 		"12345678903": &models.TooManyRequestsError{RetryAfterSeconds: 60},
@@ -159,15 +166,62 @@ func TestProcessBatchPausesOnTooManyRequests(t *testing.T) {
 		Interval: 10 * time.Millisecond, Workers: 1, BatchSize: 10,
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
+	start := time.Now()
+	require.NoError(t, poller.ProcessBatch(context.Background()))
+
+	assert.Less(t, time.Since(start), time.Second, "воркеры не должны блокироваться на время паузы")
+	assert.Equal(t, 1, client.requestCount(), "после 429 остаток пачки не опрашивается")
+	assert.Empty(t, orders.appliedOrders())
+}
+
+func TestProcessBatchSkippedWhilePaused(t *testing.T) {
+	orders := &orderRepoStub{batches: [][]string{{"12345678903"}, {"9278923470"}}}
+	client := &accrualClientStub{errs: map[string]error{
+		"12345678903": &models.TooManyRequestsError{RetryAfterSeconds: 60},
+	}}
+	poller := worker.NewAccrualPoller(orders, client, zaptest.NewLogger(t), worker.Options{
+		Interval: 10 * time.Millisecond, Workers: 2, BatchSize: 10,
+	})
+
+	require.NoError(t, poller.ProcessBatch(context.Background()))
+	require.Equal(t, 1, client.requestCount())
 
 	start := time.Now()
-	require.NoError(t, poller.ProcessBatch(ctx))
+	require.NoError(t, poller.ProcessBatch(context.Background()))
 
-	assert.Less(t, time.Since(start), time.Second, "паузу нельзя выдерживать дольше отмены контекста")
-	assert.Equal(t, 1, client.requestCount(), "после 429 следующий заказ не должен опрашиваться сразу")
-	assert.Empty(t, orders.appliedOrders())
+	assert.Less(t, time.Since(start), time.Second, "проход во время паузы возвращает управление сразу")
+	assert.Equal(t, 1, client.requestCount(), "во время паузы запросы не отправляются")
+	assert.Len(t, orders.pendingBatches(), 1, "очередь остаётся необработанной до конца паузы")
+}
+
+func TestRunResumesAfterPause(t *testing.T) {
+	accrual := models.NewPoints(100)
+	orders := &orderRepoStub{batches: [][]string{{"12345678903"}, {"9278923470"}}}
+	client := &accrualClientStub{
+		errs:      map[string]error{"12345678903": &models.TooManyRequestsError{RetryAfterSeconds: 1}},
+		responses: map[string]models.AccrualInfo{"9278923470": {Status: models.AccrualProcessed, Accrual: &accrual}},
+	}
+	poller := worker.NewAccrualPoller(orders, client, zaptest.NewLogger(t), worker.Options{
+		Interval: 10 * time.Millisecond, Workers: 2, BatchSize: 10,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- poller.Run(ctx) }()
+
+	require.Eventually(t, func() bool {
+		applied := orders.appliedOrders()
+		return len(applied) == 1 && applied[0].number == "9278923470"
+	}, 5*time.Second, 20*time.Millisecond, "после истечения паузы опрос должен возобновиться")
+
+	cancel()
+	select {
+	case err := <-done:
+		assert.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("поллер не завершился после отмены контекста")
+	}
 }
 
 func TestProcessBatchStopsOnCanceledContext(t *testing.T) {

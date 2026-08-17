@@ -30,19 +30,15 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 
 	token, err := h.auth.Register(r.Context(), creds.Login, creds.Password)
 	switch {
+	case err == nil:
+		writeAuthToken(w, token)
 	case errors.Is(err, models.ErrLoginTaken):
 		http.Error(w, "login is already taken", http.StatusConflict)
-		return
 	case errors.Is(err, models.ErrInvalidCredentials):
 		http.Error(w, "login and password must not be empty", http.StatusBadRequest)
-		return
-	case err != nil:
+	default:
 		h.internalError(w, "register user", err)
-		return
 	}
-
-	setAuthToken(w, token)
-	w.WriteHeader(http.StatusOK)
 }
 
 // Login обрабатывает POST /api/user/login: аутентифицирует пользователя
@@ -58,16 +54,13 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 
 	token, err := h.auth.Login(r.Context(), creds.Login, creds.Password)
 	switch {
+	case err == nil:
+		writeAuthToken(w, token)
 	case errors.Is(err, models.ErrInvalidCredentials):
 		http.Error(w, "invalid login/password pair", http.StatusUnauthorized)
-		return
-	case err != nil:
+	default:
 		h.internalError(w, "login user", err)
-		return
 	}
-
-	setAuthToken(w, token)
-	w.WriteHeader(http.StatusOK)
 }
 
 // decodeCredentials разбирает тело запроса с парой логин/пароль.
@@ -87,9 +80,9 @@ func decodeCredentials(w http.ResponseWriter, r *http.Request) (credentials, boo
 	return creds, true
 }
 
-// setAuthToken передаёт клиенту токен аутентификации заголовком Authorization
-// и дублирует его в cookie.
-func setAuthToken(w http.ResponseWriter, token string) {
+// writeAuthToken передаёт клиенту токен аутентификации заголовком Authorization,
+// дублирует его в cookie и отвечает кодом 200.
+func writeAuthToken(w http.ResponseWriter, token string) {
 	w.Header().Set("Authorization", "Bearer "+token)
 	http.SetCookie(w, &http.Cookie{
 		Name:     middleware.AuthCookieName,
@@ -98,4 +91,5 @@ func setAuthToken(w http.ResponseWriter, token string) {
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 	})
+	w.WriteHeader(http.StatusOK)
 }

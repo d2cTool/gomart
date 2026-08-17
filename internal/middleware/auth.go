@@ -25,9 +25,8 @@ type TokenParser interface {
 }
 
 // Auth возвращает посредник, пропускающий дальше только запросы с корректным
-// токеном аутентификации. Токен читается из заголовка Authorization
-// (схема Bearer) либо из cookie. Идентификатор пользователя помещается
-// в контекст запроса.
+// токеном аутентификации. Источник токена выбирается по правилам
+// tokenFromRequest. Идентификатор пользователя помещается в контекст запроса.
 func Auth(parser TokenParser) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -59,18 +58,42 @@ func UserIDFromContext(ctx context.Context) (int64, bool) {
 	return userID, ok
 }
 
-// tokenFromRequest достаёт токен из заголовка Authorization или из cookie.
+// tokenFromRequest извлекает токен аутентификации.
+//
+// Источники в порядке приоритета:
+//  1. заголовок Authorization — схема Bearer или само значение заголовка;
+//  2. cookie AuthCookieName.
+//
+// Cookie читается только если в заголовке нет токена: заголовок отсутствует,
+// пуст или содержит одну схему Bearer без учётных данных. Если заголовок
+// задаёт непустое значение, cookie не используется, даже если это значение
+// не проходит проверку подписи.
 func tokenFromRequest(r *http.Request) string {
-	header := strings.TrimSpace(r.Header.Get("Authorization"))
-	if header != "" {
-		const scheme = "Bearer "
-		if len(header) > len(scheme) && strings.EqualFold(header[:len(scheme)], scheme) {
-			return strings.TrimSpace(header[len(scheme):])
-		}
-		return header
+	if token := tokenFromAuthorization(r.Header.Get("Authorization")); token != "" {
+		return token
 	}
-	if cookie, err := r.Cookie(AuthCookieName); err == nil {
-		return cookie.Value
+	cookie, err := r.Cookie(AuthCookieName)
+	if err != nil {
+		return ""
 	}
-	return ""
+	return cookie.Value
+}
+
+// tokenFromAuthorization извлекает токен из значения заголовка Authorization.
+// Пустая строка означает, что в заголовке токена нет и можно обратиться
+// к следующему источнику.
+func tokenFromAuthorization(header string) string {
+	header = strings.TrimSpace(header)
+	if header == "" {
+		return ""
+	}
+
+	const scheme = "Bearer "
+	if len(header) >= len(scheme) && strings.EqualFold(header[:len(scheme)], scheme) {
+		return strings.TrimSpace(header[len(scheme):])
+	}
+	if strings.EqualFold(header, strings.TrimSpace(scheme)) {
+		return ""
+	}
+	return header
 }

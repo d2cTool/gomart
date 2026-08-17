@@ -85,6 +85,14 @@ func (p *AccrualPoller) Run(ctx context.Context) error {
 		if err := p.ProcessBatch(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			p.log.Error("process accrual batch", zap.Error(err))
 		}
+
+		if pause := p.limiter.retryAfter(); pause > 0 {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(pause):
+			}
+		}
 	}
 }
 
@@ -92,6 +100,10 @@ func (p *AccrualPoller) Run(ctx context.Context) error {
 // расчёта начислений. Метод экспортирован, чтобы обработку можно было
 // вызывать точечно, в том числе из тестов.
 func (p *AccrualPoller) ProcessBatch(ctx context.Context) error {
+	if p.limiter.retryAfter() > 0 {
+		return nil
+	}
+
 	numbers, err := p.orders.TakePending(ctx, p.opts.BatchSize)
 	if err != nil {
 		return err
@@ -113,6 +125,9 @@ func (p *AccrualPoller) ProcessBatch(ctx context.Context) error {
 	}
 
 	for _, number := range numbers {
+		if p.limiter.retryAfter() > 0 {
+			break
+		}
 		select {
 		case <-ctx.Done():
 			close(jobs)
@@ -130,7 +145,7 @@ func (p *AccrualPoller) ProcessBatch(ctx context.Context) error {
 // результат. Ошибки не прерывают обработку остальных заказов: заказ
 // останется в очереди и будет опрошен на следующем проходе.
 func (p *AccrualPoller) processOrder(ctx context.Context, number string) {
-	if err := p.limiter.wait(ctx); err != nil {
+	if p.limiter.retryAfter() > 0 {
 		return
 	}
 
@@ -176,8 +191,9 @@ func (p *AccrualPoller) handleClientError(number string, err error) {
 	}
 }
 
-// limiter приостанавливает обращения к системе расчёта начислений после
-// получения ответа 429 Too Many Requests.
+// limiter хранит момент, до которого обращения к системе расчёта начислений
+// приостановлены после ответа 429 Too Many Requests. Методы не блокируют
+// вызывающую горутину: решение о том, сколько ждать, принимает цикл опроса.
 type limiter struct {
 	mu    sync.Mutex
 	until time.Time
@@ -193,23 +209,14 @@ func (l *limiter) pause(d time.Duration) {
 	}
 }
 
-// wait блокирует вызывающую горутину до окончания паузы либо до отмены
-// контекста.
-func (l *limiter) wait(ctx context.Context) error {
+// retryAfter возвращает остаток паузы или ноль, если ограничение уже снято.
+func (l *limiter) retryAfter() time.Duration {
 	l.mu.Lock()
-	until := l.until
-	l.mu.Unlock()
+	defer l.mu.Unlock()
 
-	delay := time.Until(until)
-	if delay <= 0 {
-		return nil
+	delay := time.Until(l.until)
+	if delay < 0 {
+		return 0
 	}
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
+	return delay
 }
